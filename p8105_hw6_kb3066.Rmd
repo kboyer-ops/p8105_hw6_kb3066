@@ -1,0 +1,222 @@
+---
+title: "p8105_hw6_kb3066"
+author: "Kaila Boyer"
+date: "11/28/2021"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+
+library(tidyverse)
+library(modelr) 
+library(mgcv)
+
+
+knitr::opts_chunk$set(
+  fig.width = 7,
+  fig.asp = .7,
+  out.width = "90%"
+)
+
+theme_set(theme_minimal() + theme(legend.position = "bottom"))
+
+options(
+  ggplot2.continuous.colour = "viridis",
+  ggplot2.continuous.fill = "viridis",
+  scale_colour_discrete = scale_colour_viridis_d,
+scale_fill_discrete = scale_fill_viridis_d
+)
+```
+## Problem 1 
+
+```{r}
+birth <- read_csv("birthweight.csv") %>% 
+                            janitor::clean_names() %>% 
+                            mutate(
+                              babysex = as.factor(babysex),
+                              babysex = fct_recode(babysex, "Male" = "1", "Female" = "2"),
+                              frace = as.factor(frace),
+                              frace = fct_recode(frace, "White" = "1", "Black" = "2", "Asian" = "3", 
+                                                 "Puerto Rican" = "4", "Other" = "8"),
+                              malform = as.logical(malform),
+                              mrace = as.factor(mrace),
+                              mrace = fct_recode(mrace, "White" = "1", "Black" = "2", "Asian" = "3", 
+                                                 "Puerto Rican" = "4"))
+
+
+```
+
+
+```{r}
+fit1 <- lm(bwt ~ blength + babysex,  data = birth )
+fit1 %>% broom::tidy()
+
+modelr::add_residuals(birth, fit1) %>% 
+  ggplot(aes(y= resid, x = babysex)) +
+  geom_point() 
+
+modelr::add_predictions(birth, fit1) %>% 
+  ggplot(aes(x = babysex, y = pred)) + 
+  geom_point() 
+```
+The model I proposed was that length at birth and sex of the child help predict birth weight. Length of an object, particularly an infant, would likely have a direct relationship with length (a longer baby would weight more). Sex-differences can be observed with health outcomes, so I included sex of the baby. 
+
+```{r}
+fit2 <- lm(bwt ~ blength + gaweeks, data = birth)
+fit2 %>% broom::tidy()
+
+fit3 <- lm(bwt ~ bhead + blength + babysex + bhead * blength
+           + bhead * babysex + blength * babysex + bhead * babysex * blength, data = birth)
+fit3 %>% broom::tidy() %>% knitr::kable(digits = 3)
+```
+
+Visual comparison of models (residuals and predictions)
+```{r}
+birth %>% 
+  gather_predictions(fit1, fit2, fit3) %>% 
+  mutate(model = fct_inorder(model)) %>%  
+  ggplot(aes(x = bwt, y = pred)) + 
+  geom_point(alpha = .5) +
+  geom_smooth( color = "red") + 
+  facet_grid(~model)
+
+birth %>% 
+  gather_residuals(fit1, fit2, fit3) %>% 
+  mutate(model = fct_inorder(model)) %>%  
+  ggplot(aes(x = bwt, y = resid)) + 
+  geom_point(alpha = .5) +
+  geom_smooth( color = "red") + 
+  facet_grid(~model)
+```
+
+Comparison and cross-validation of models
+```{r}
+cv_df <- crossv_mc(birth, 1000) %>% 
+  mutate(
+    train = map(train, as_tibble), 
+    test = map(test, as_tibble)
+  )
+
+cv_df = 
+  cv_df %>% 
+  mutate(
+    fit1_mod = map(train, ~lm(bwt ~ blength + smoken + mrace, data = .x)),
+    fit2_mod = map(train, ~lm(bwt ~ blength + gaweeks, data = .x)),
+    fit3_mod = map(train, ~lm(bwt ~ bhead + blength + babysex + bhead * blength + bhead * babysex + 
+                              blength * babysex + bhead * babysex * blength, data = .x))) %>% 
+  mutate(
+    rmse_fit1 = map2_dbl(fit1_mod, test, ~rmse(model = .x, data = .y)),
+    rmse_fit2 = map2_dbl(fit2_mod, test, ~rmse(model = .x, data = .y)),
+    rmse_fit3 = map2_dbl(fit3_mod, test, ~rmse(model = .x, data = .y)))
+
+cv_df %>% 
+  select(starts_with("rmse")) %>% 
+  pivot_longer(
+    everything(),
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_") %>% 
+  mutate(model = fct_inorder(model)) %>% 
+  ggplot(aes(x = model, y = rmse)) + geom_violin()
+```
+
+## Problem 2
+
+```{r}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+```
+
+Bootstrap estimates
+```{r}
+boot_sample = function(df) {
+  sample_frac(df, replace = TRUE)
+}
+
+weather_bootstraps = 
+  data_frame(
+    strap_number = 1:5000,
+    strap_sample = rerun(5000, boot_sample(weather_df)))
+
+results <-weather_bootstraps %>%  
+                    mutate(
+                        models = map(strap_sample, ~lm(tmax ~ tmin, data = .x) ),
+                        results = map(models, broom::tidy)) %>% 
+                    select(-strap_sample, -models) %>% 
+                    unnest(results) 
+
+head(results) %>% knitr::kable()
+
+results %>% 
+  group_by(term) %>% 
+  summarize(
+    ci_lower = quantile(estimate, 0.025), 
+    ci_upper = quantile(estimate, 0.975)) %>% 
+  knitr::kable()
+```
+
+R-squared values 
+```{r}
+boot_rsqd <- weather_bootstraps %>%  
+                        mutate(
+                            models = map(strap_sample, ~lm(tmax ~ tmin, data = .x) ),
+                            summary = map(models, broom::glance), 
+                            results = map(models, broom::tidy)) %>% 
+                        select(-strap_sample, -models, -results) %>% 
+                        unnest(summary) %>% 
+                        select(strap_number, r.squared, adj.r.squared)
+
+head(boot_rsqd) %>% knitr::kable(digits = 3)
+```
+
+log(B0*B1) values 
+```{r}
+logb_df <- results %>% 
+                  select(-std.error, -statistic, -p.value) %>% 
+                  pivot_wider(
+                    names_from = term, 
+                    values_from = estimate) %>% 
+                  rowwise(strap_number) %>% 
+                  mutate(
+                    B0B1 = `(Intercept)` * tmin, 
+                    logB0B1 = log(B0B1)) %>% 
+                  select(strap_number, logB0B1) 
+
+head(logb_df) %>% knitr::kable(digits = 3)
+```
+
+Confidence intervals for r-squared and log(B0*B1)
+```{r}
+combined_df <- full_join(boot_rsqd, logb_df, by = "strap_number")
+
+combined_df <- combined_df %>% 
+                      pivot_longer(cols = !strap_number, 
+                                   names_to = "measure", 
+                                   values_to = "estimate") %>% 
+                      group_by(measure) %>% 
+                      summarize(
+                        ci_lower = quantile(estimate, 0.025), 
+                        ci_upper = quantile(estimate, 0.975))
+
+head(combined_df) %>% knitr::kable(digits = 3)
+```
+
+## Graph of bootstrap samples
+```{r}
+weather_bootstraps %>% 
+  unnest(strap_sample) %>% 
+  ggplot(aes(x = tmin, y = tmax)) + 
+  geom_line(aes(group = strap_number), stat = "smooth", method = "lm", se = FALSE, alpha = .1, color = "blue") +
+  geom_point(data = weather_df, alpha = .5) + 
+  ggpubr::stat_regline_equation(label.y = 50, aes(label = ..rr.label..))
+```
+The distribution of the boostrap estimates is wider at the low-end of the distribution (by tmin = -10). The distribution narrows towards the higher end of the distribution (around tmin = 10 - 18 adn tmax = 18 - 25). At the highest end, the distribution appears to start widening again. 
